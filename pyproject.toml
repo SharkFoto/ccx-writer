@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ccx-writer"
-version = "0.1.0"
+version = "0.1.1"
 description = "SVG to CorelDRAW CCX (.cdr) / CMX writer in pure Python 3, derived from UniConvertor 2.0"
 readme = "README.md"
 requires-python = ">=3.6"

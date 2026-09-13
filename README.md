@@ -17,7 +17,7 @@ this package needs nothing outside the standard library.
 ## Install
 
 ```bash
-pip install https://github.com/SharkFoto/ccx-writer/archive/refs/tags/v0.1.0.tar.gz
+pip install https://github.com/SharkFoto/ccx-writer/archive/refs/tags/v0.1.1.tar.gz
 ```
 
 Python 3.6 or newer.
@@ -106,7 +106,7 @@ only to prove the port is faithful.
   determinism across processes. 65 deliberately corrupted files prove each check
   fires. Adversarial inputs cover empty documents, degenerate strokes, dash edge
   cases, gradients, huge artwork and compound fills with hundreds of holes.
-- **Mutation testing.** Reverting any single fix must make the gates fail. 23 of 24
+- **Mutation testing.** Reverting any single fix must make the gates fail. 24 of 25
   reverted fixes are caught; the remaining one is unreachable by construction.
 
 The verification tooling (decoder, gates, fixtures, the Python 2 reference container)

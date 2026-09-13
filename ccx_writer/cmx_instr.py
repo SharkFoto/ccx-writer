@@ -184,6 +184,21 @@ class CmxInstruction(CmxObject):
     # hex 查看器侧,移植版不要:update_for_sword
 
 
+def _bbox_bytes(config, bbox):
+    """BeginPage / BeginGroup 的包围盒,16 字节。
+
+    原版按 UC2 读取侧的布局写 4 x s32。修复 #30:CMX 规范与 libcdr(CMXParser::readBeginPage /
+    readBeginGroup -> readBBox -> readCoordinate)在 16 位里都是 4 x s16,后面紧跟页/组的计数字段。
+    libcdr 按 s16 读到的是 s32 的高低半字,页面尺寸成了乱值(dev 实测回读 SVG 高 0.03mm,
+    栅格化直接失败)。修复版写 4 x s16 再补 8 个零字节,指令总长与原版相同 ——
+    规范里这 8 个字节是计数/偏移,原版在那里写的是 s32 的高半字,CorelDRAW 照样打开,
+    说明它不依赖这些值。"""
+    rifx = config.rifx
+    if config.uc2_compat:
+        return utils.py2_pack('>iiii' if rifx else '<iiii', *bbox)
+    return utils.py2_pack('>hhhh' if rifx else '<hhhh', *bbox) + b'\x00' * 8
+
+
 class Inst16BeginPage(CmxInstruction):
     is_page = True
 
@@ -196,8 +211,7 @@ class Inst16BeginPage(CmxInstruction):
         self.chunk = b'\x00\x00' + int2word(self.data['code'], rifx)
         self.chunk += int2word(self.data['page_number'], rifx)
         self.chunk += int2dword(self.data['flags'], rifx)
-        sig = '>iiii' if rifx else '<iiii'
-        self.chunk += utils.py2_pack(sig, *self.data['bbox'])
+        self.chunk += _bbox_bytes(self.config, self.data['bbox'])
         self.chunk += self.data['tail']
         CmxInstruction.update(self)
 
@@ -236,8 +250,7 @@ class Inst16BeginGroup(CmxInstruction):
         rifx = self.config.rifx
         int2word = utils.py_int2word
         self.chunk = b'\x00\x00' + int2word(self.data['code'], rifx)
-        sig = '>iiii' if rifx else '<iiii'
-        self.chunk += utils.py2_pack(sig, *self.data['bbox']) + self.data['tail']
+        self.chunk += _bbox_bytes(self.config, self.data['bbox']) + self.data['tail']
         CmxInstruction.update(self)
 
     # hex 查看器侧,移植版不要:update_for_sword
