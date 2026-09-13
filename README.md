@@ -17,7 +17,7 @@ this package needs nothing outside the standard library.
 ## Install
 
 ```bash
-pip install https://github.com/SharkFoto/ccx-writer/archive/refs/tags/v0.1.1.tar.gz
+pip install https://github.com/SharkFoto/ccx-writer/archive/refs/tags/v0.1.2.tar.gz
 ```
 
 Python 3.6 or newer.
@@ -106,15 +106,15 @@ only to prove the port is faithful.
   determinism across processes. 65 deliberately corrupted files prove each check
   fires. Adversarial inputs cover empty documents, degenerate strokes, dash edge
   cases, gradients, huge artwork and compound fills with hundreds of holes.
-- **Mutation testing.** Reverting any single fix must make the gates fail. 24 of 25
+- **Mutation testing.** Reverting any single fix must make the gates fail. 28 of 29
   reverted fixes are caught; the remaining one is unreachable by construction.
+- **Real readers.** Fixed output was opened in CorelDRAW and its objects inspected:
+  sizes (80×30 mm → 79.98×30.00 mm), outline widths (1–20 mm within 0.01 mm), colours,
+  positions, Chinese text converted to curves, and 7 pt type on an A3 page. It was
+  also read back through libcdr (LibreOffice) to SVG and PNG with correct page size.
 
 The verification tooling (decoder, gates, fixtures, the Python 2 reference container)
 lives in SharkFoto's internal repository and is not part of this package.
-- **Real readers.** CorelDRAW opens the original writer's output (identical to
-  compatibility mode) both uncompressed and packed, with the same result. The gates
-  replay libcdr's own instruction-length parsing. Opening *fixed* output in CorelDRAW
-  has not been checked for this release yet.
 
 ## Limits
 
@@ -122,6 +122,9 @@ lives in SharkFoto's internal repository and is not part of this package.
   `inkscape --export-text-to-path --export-plain-svg`).
 - `<image>`: raster images are rejected.
 - Gradients are written as the gradient's mean colour. Opacity is ignored.
+- Dash lengths are rounded to whole multiples of the line width. CorelDRAW turns
+  dashed outlines into grouped filled shapes when it imports CMX: they look right,
+  but the dash is no longer an editable outline style. Solid outlines stay editable.
 - Clipping paths and masks are removed by `svgprep`, so clipped content shows in full.
 - A single filled compound path whose outline and holes exceed 6540 points cannot be
   split without filling the holes, so it is rejected with exit code 2. Stroke-only

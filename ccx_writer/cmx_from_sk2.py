@@ -159,6 +159,9 @@ class SK2_to_CMX_Translator(object):
                 joincap = (join << 4) | cap
                 # 修复 #8:原版 spec 恒为 0x02,从不置虚线位,虚线全部丢失。
                 # 读取侧 cmx_to_sk2.py:245:dashes 只在 spec & 0x04 时生效。
+                # 保留实线位(0x06):CorelDRAW 真机实测只写 0x04 时虚线被忽略、画成实线。
+                # 0x06 的虚线 CorelDRAW 导入后转成「组 + 填充曲线」,外观、虚线节奏正确,
+                # 但不再是可编辑的虚线轮廓;0x26(随图缩放)同样。实线轮廓保持可编辑。
                 if outline[3]:
                     spec |= 0x04
             linestyle = (spec, joincap)
@@ -199,6 +202,8 @@ class SK2_to_CMX_Translator(object):
         linestyle = self._add_line_style(outline)
         screen = 1
         color = self._add_color(outline[2])
+        # 必须是 1(指向 rota 里的 (0,0) 无箭头条目)。CorelDRAW 真机实测(2026-09-13):
+        # 改成 0 的开放路径整条被丢掉,实线虚线都一样。
         arrowheads = 1
         pen = self._add_pen(outline)
         dashes = self._add_dash(outline)
@@ -397,6 +402,16 @@ class SK2_to_CMX_Translator(object):
                 # 空组不写出。
                 parent_instr.childs.remove(group_instr)
                 return
+            content = group_instr.childs[:-1]           # 去掉 EndGroup
+            if not self.cmx_cfg.uc2_compat and len(content) == 1:
+                # 修复 #32:只装一个对象的组没有意义,原样写出后 CorelDRAW 里全是「Group of 1 Objects」。
+                # LibreOffice 导出 SVG 给每个图形各包一层 <g>(去掉 #31 的包围盒矩形后就只剩一个对象)。
+                # 按**输出**判:组里恰好一条 PolyCurve 或一个子组才展开;一条曲线被拆成多条 PolyCurve
+                # 时保留组,拆开的几段仍在一起。
+                idx = parent_instr.childs.index(group_instr)
+                parent_instr.childs[idx] = content[0]
+                content[0].parent = parent_instr
+                return
             group_instr.data['bbox'] = group_bbox
 
         elif obj.is_primitive:
@@ -412,6 +427,8 @@ class SK2_to_CMX_Translator(object):
             elif curve.is_group:
                 self.make_v1_objects(parent_instr, curve)
             elif curve.paths:
+                if not self.cmx_cfg.uc2_compat and not self._visible(curve):
+                    return                          # 修复 #31:看不见的曲线不写出
                 close_flag = False
                 style = curve.style
                 attrs = {
@@ -522,6 +539,24 @@ class SK2_to_CMX_Translator(object):
             self._curves[key] = curve
         return self._curves[key]
 
+    def _visible(self, curve):
+        """修复 #31:既没有填充、也没有可见描边的曲线看不见,不写出、不计入量程。
+        LibreOffice 导出 SVG 时给每个图形附一个 fill="none" stroke="none" 的包围盒矩形
+        (class="BoundingBox");原样写出后 CorelDRAW 每个组里都多一个看不见的对象(真机实测)。
+        判定与写出一致:实色、有色标的渐变算填充(#27);描边有效宽度 > 0 才算描边(#19)。"""
+        style = curve.style
+        if not style:
+            return False
+        fill = style[0]
+        if fill and (fill[1] == sk2const.FILL_SOLID or
+                     (fill[1] == sk2const.FILL_GRADIENT and
+                      _gradient_mean_color(fill[2][2]) is not None)):
+            return True
+        if style[1]:
+            w = self._stroke_width_pt(curve)
+            return bool(w and w > 0)
+        return False
+
     def _max_abs_coord(self, objs):
         """修复 #2:所有将要写出的点(含贝塞尔控制点)与包围盒的最大绝对值,单位 pt。
         遍历与 make_v1_objects 同构。"""
@@ -540,7 +575,7 @@ class SK2_to_CMX_Translator(object):
             if curve.is_group:
                 stack.extend(curve.childs)
                 continue
-            if not curve.paths:
+            if not curve.paths or not self._visible(curve):
                 continue
             for path in libgeom.apply_trafo_to_paths(curve.paths, curve.trafo):
                 if not path[1]:
