@@ -1,0 +1,274 @@
+# -*- coding: utf-8 -*-
+#
+#  ccx_writer —— UniConvertor 2.0 @973d5b6 的 Python 3 移植(SVG 前端)
+#  Copyright (C) 2012-2017 by Ihor E. Novikov(原版)
+#  Copyright (C) 2026 SharkFoto(Python 3 移植)
+#
+#  GNU Affero General Public License v3 或更高版本,见本目录的 LICENSE。
+
+# 原 uc2/formats/generic.py,逐行对应移植。
+#
+# 与原版的差异:
+#   - 导入:from uc2 import _, uc2const / from uc2 import events, msgconst /
+#     from uc2.utils import fsutils  -> 下面四行绝对导入(_ 来自 ccx_writer.translator)
+#   - ModelObject.destroy:遍历 self.__dict__.keys() 时给值赋 None。Py3 的 keys()
+#     是视图;只改值不改键不会触发「dict changed size」,但按移植约定套 list(...)。
+#   - BinaryModelObject.chunk:Py2 的 '' 是字节串,Py3 对应 b''。
+#   - ModelPresenter.close:Py2 把 unicode 文件名编码成 utf-8 str 只为拼进 str 消息;
+#     Py3 文件名本就是 str,编码成 bytes 反而拼出 "b'...'",去掉(见该处注释)。
+#   - LOG.warn -> LOG.warning(同一个方法;warn 在 Py3 已弃用)。
+#
+# Py2 -> Py3 静默差异逐项核过,其余没有需要改写的:
+#   - 没有 round / 整数除法;count() 只做整数加法。
+#   - 没有 map/filter/zip、basestring、cmp 排序。
+#   - 事件消息里的 % 格式化只拼字符串,不进 sk2 对象树。
+
+import logging
+
+from ccx_writer.translator import _
+from ccx_writer import uc2const
+from ccx_writer import events, msgconst
+from ccx_writer import fsutils
+
+LOG = logging.getLogger(__name__)
+
+
+class ModelObject(object):
+    """
+    Abstract parent class for all model
+    objects. Provides common object properties.
+    """
+    cid = 0
+    parent = None
+    config = None
+    childs = []
+
+    def destroy(self):
+        for child in self.childs:
+            child.destroy()
+        # Py3:keys() 是视图,按移植约定先 list(...) 再遍历(只改值,原版语义不变)
+        for item in list(self.__dict__.keys()):
+            self.__dict__[item] = None
+
+    def update(self):
+        pass
+
+    def update_for_sword(self):
+        pass
+
+    def do_update(self, presenter=None, action=False):
+        for child in self.childs:
+            child.parent = self
+            child.config = self.config
+            child.do_update(presenter, action)
+        self.update()
+        if action:
+            self.update_for_sword()
+
+    def add(self, child, before=False):
+        if before:
+            self.childs.insert(0, child)
+        else:
+            self.childs.append(child)
+        child.parent = self
+        child.config = self.config
+
+    def add_childs(self, childs, before=False):
+        if before:
+            self.childs = childs + self.childs
+        else:
+            self.childs += childs
+        for child in childs:
+            child.parent = self
+            child.config = self.config
+
+    def remove(self, child):
+        if child in self.childs:
+            self.childs.remove(child)
+
+    def count(self):
+        val = len(self.childs)
+        for child in self.childs:
+            val += child.count()
+        return val
+
+    def resolve(self):
+        if self.childs:
+            return False, 'Node', ''
+        return True, 'Leaf', ''
+
+
+class TextModelObject(ModelObject):
+    properties = []
+    string = ''
+    end_string = ''
+
+
+GENERIC_TAGS = ['cid', 'childs', 'parent', 'config', 'tag']
+IDENT = '\t'
+
+
+class TaggedModelObject(ModelObject):
+    tag = ''
+
+
+class BinaryModelObject(ModelObject):
+    # Py2 的 '' 是字节串;Py3 二进制块对应 b''
+    chunk = b''
+    cache_fields = []
+
+    def save(self, saver):
+        saver.write(self.chunk)
+        for child in self.childs:
+            child.save(saver)
+
+
+class ModelPresenter(object):
+    """
+    Abstract parent class for all model
+    presenters. Provides common functionality.
+    """
+
+    cid = 0
+    model_type = uc2const.GENERIC_MODEL
+    config = None
+    doc_dir = ''
+    doc_file = ''
+    doc_id = ''
+    model = None
+
+    loader = None
+    saver = None
+    methods = None
+    obj_num = 0
+
+    def new(self):
+        pass
+
+    def load(self, filename=None, fileptr=None):
+        if filename and fsutils.exists(filename):
+            self.doc_file = filename
+        elif not fileptr:
+            msg = _('Error while loading:') + ' ' + _('No file')
+            self.send_error(msg)
+            raise IOError(msg)
+
+        try:
+            self.parsing_msg(0.03)
+            self.send_info(_('Parsing in progress...'))
+            self.model = self.loader.load(self, filename, fileptr)
+        except Exception as e:
+            self.close()
+            LOG.error('Error loading %s', filename)
+            LOG.exception(e)
+            raise
+
+        model_name = uc2const.FORMAT_NAMES[self.cid]
+        self.send_ok(_('<%s> document model is created') % model_name)
+        self.update()
+
+    def update(self, action=False):
+        if self.model is not None:
+            self.obj_num = self.model.count() + 1
+            self.update_msg(0.0)
+            try:
+                self.model.config = self.config
+                self.model.do_update(self, action)
+            except Exception as e:
+                LOG.error(_('Error updating document model'))
+                LOG.exception(e)
+                raise
+
+            model_name = uc2const.FORMAT_NAMES[self.cid]
+            msg = _('<%s> document model is updated successfully') % model_name
+            self.send_progress_message(msg, 0.99)
+            self.send_ok(msg)
+
+    def save(self, filename=None, fileptr=None):
+        if filename:
+            self.doc_file = filename
+        elif not fileptr:
+            msg = _('Error while saving:') + ' ' + _('No file object')
+            self.send_error(msg)
+            raise IOError(msg)
+
+        try:
+            self.saving_msg(0.03)
+            self.send_info(_('Saving is started...'))
+            self.saver.save(self, filename, fileptr)
+        except Exception as e:
+            msg = _('Error while saving') + ' ' + filename + ' %s'
+            LOG.error(msg)
+            LOG.exception(e)
+            raise
+
+        model_name = uc2const.FORMAT_NAMES[self.cid]
+        msg = _('<%s> document model is saved successfully') % model_name
+        self.send_progress_message(msg, 0.95)
+        self.send_ok(msg)
+
+    def close(self):
+        filename = self.doc_file
+        self.doc_file = ''
+        if self.model is not None:
+            self.model.destroy()
+        self.model = None
+        # Py2 原版:filename = filename.encode('utf-8') \
+        #     if isinstance(filename, unicode) else filename
+        # 只为把 unicode 文件名变成 str 拼进 str 消息;Py3 的 str 就是文本,
+        # 编码成 bytes 反而拼出 "b'...'",所以不编码,filename 原样用。
+        model_name = uc2const.FORMAT_NAMES[self.cid]
+        self.send_ok(_('<%s> document model is destroyed for %s') %
+                     (model_name, filename))
+
+        if self.doc_dir and fsutils.exists(self.doc_dir):
+            try:
+                fsutils.rmtree(self.doc_dir)
+                self.send_ok(_('Cache is cleared for') + ' %s' % filename)
+            except Exception as e:
+                msg = _('Cache clearing is unsuccessful')
+                self.send_error(msg)
+                # 原版 LOG.warn;Py3 里 warn 是已弃用的 warning 别名
+                LOG.warning(msg + ' %s', e)
+                LOG.exception(e)
+
+    def update_msg(self, val):
+        model_name = uc2const.FORMAT_NAMES[self.cid]
+        msg = _('%s model update in progress...') % model_name
+        self.send_progress_message(msg, val)
+
+    def parsing_msg(self, val):
+        msg = _('Parsing in progress...')
+        self.send_progress_message(msg, val)
+
+    def saving_msg(self, val):
+        msg = _('Saving in progress...')
+        self.send_progress_message(msg, val)
+
+    @staticmethod
+    def send_progress_message(msg, val):
+        events.emit(events.FILTER_INFO, msg, val)
+
+    @staticmethod
+    def send_ok(msg):
+        events.emit(events.MESSAGES, msgconst.OK, msg)
+
+    @staticmethod
+    def send_info(msg):
+        events.emit(events.MESSAGES, msgconst.INFO, msg)
+
+    @staticmethod
+    def send_error(msg):
+        events.emit(events.MESSAGES, msgconst.ERROR, msg)
+
+
+class TextModelPresenter(ModelPresenter):
+    model_type = uc2const.TEXT_MODEL
+
+
+class TaggedModelPresenter(ModelPresenter):
+    model_type = uc2const.TAGGED_MODEL
+
+
+class BinaryModelPresenter(ModelPresenter):
+    model_type = uc2const.BINARY_MODEL

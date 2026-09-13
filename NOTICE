@@ -1,0 +1,42 @@
+ccx_writer —— CorelDRAW CCX / CMX v1 写出器,Python 3 移植版
+================================================================
+
+来源
+----
+本仓库的代码派生自 UniConvertor 2.0(sK1 Project),仅取其 **写出侧** 的
+CMX 部分,以及它依赖的 SVG 读入、sk2 文档模型:
+
+    upstream:  https://github.com/sk1project/uniconvertor
+    revision:  973d5b6f8fccce7e7bf9bc88e91bc80f9f9d9472
+    原作者:    Ihor E. Novikov 等(见各文件头的版权声明)
+    许可:      GNU Affero General Public License v3 或更高版本
+
+原版只支持 Python 2。
+
+我们改了什么
+------------
+1. **移植到 Python 3**:Py2 的 str 即字节,Py3 必须显式区分。所有参与
+   字节拼装的字面量改为 bytes;隐式相对导入改为绝对导入;整除、round()、
+   struct.pack 对浮点的截断、exec 解析属性值等 Py2 语义逐一复刻。
+   这一步**刻意不改变任何语义** —— 验收判据是与 Py2 原版字节一致
+   (未压缩 .cmx 比整文件 sha256,压缩 .cdr 比解压流 sha256)。
+2. **去掉原生依赖**:写出链路用到的那一小片 cairo 用纯 Python 逐位复刻
+   (_cairo_fixed.py,与 libcairo 1.15.10 零差异);基于 lcms 的色彩管理不移植,
+   只保留写出链路用到的四个纯函数,其余换成一律抛 NotImplementedError 的桩(cms.py)。
+3. **缺陷修复**:在字节一致的基线之上逐项落地,每一项都按
+   `uc2_compat` 开关分流 —— True 逐位复现原版,False(默认)是修复后的行为。
+   清单、原因与验证方式见 BUGS.md;代码注释里的编号与之对应。
+4. 裁掉了读取侧、hex 查看器、CLI 脚手架、偏好文件(原版用 exec 加载)、
+   位图、文字转曲线与 DISP 预览。删除处留有注释。
+5. 新增 svgprep.py(SVG 输入规范化)、convert.py 与 __main__.py(入口)。
+
+写进 ICMT 块的 "Created by UniConvertor 2.0rc5" 保持原版取值,
+兼容模式的字节一致性依赖它。
+
+许可义务
+--------
+本仓库是 AGPLv3 作品的修改版。以网络服务形式向用户提供修改版时,
+AGPLv3 第 13 条要求向这些用户提供对应源码。
+
+MihailCosmin 的 fork 不能当移植基线:它对 cmx 目录的全部改动是 1 行 import,
+且那一行本身引入了向 BytesIO 写 str 的错误。

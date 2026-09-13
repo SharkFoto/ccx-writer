@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ccx-writer"
+version = "0.1.0"
+description = "SVG to CorelDRAW CCX (.cdr) / CMX writer in pure Python 3, derived from UniConvertor 2.0"
+readme = "README.md"
+requires-python = ">=3.6"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "SharkFoto" }]
+classifiers = [
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
+]
+
+[project.scripts]
+ccx-writer = "ccx_writer.__main__:main"
+
+[tool.setuptools]
+packages = ["ccx_writer"]
