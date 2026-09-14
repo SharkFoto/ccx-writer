@@ -335,3 +335,52 @@ NODE_MOVE = 0b00000000
 NODE_LINE = 0b01000000
 NODE_CURVE = 0b10000000
 NODE_ARC = 0b11000000
+
+######## 32 位 CMX(移植版新增,原版没有 32 位写出)##############
+# 布局照 CorelDRAW 自己导出的 32 位 CMX(CorelDRAW Web「CMX - Corel Presentation Exchange Legacy」,
+# 2026-09-14 导出、逐字节拆过)和 libcdr CMXParser 的 32 位读取分支。
+# 32 位里指令和资源表的每条记录都是「标签列表」:tag id(u8)+ 标签总长(u16,含这 3 字节)+ 载荷,
+# 以 0xFF 结束。
+
+TAG_END = 0xFF
+
+# 坐标单位 1/254000 英寸(libcdr CommonParser::readCoordinate:readS32 / 254000.0)
+UNITS_PER_IN_32 = 254000.0
+# cont 头:CorelDRAW 导出写 unit = 0x23、factor = 1e-7(即 CONT_UNIT_MM + CONT_FACTOR_MM)
+
+# 页 / 层 / 曲线指令里的标签(libcdr CMXDocumentStructure.h 的 CMX_Tag_*)
+TAG_PAGE_SPEC = 1
+TAG_PAGE_MATRIX = 2
+TAG_PAGE_MAPPING_MODE = 3
+TAG_LAYER_SPEC = 1
+TAG_LAYER_MATRIX = 2
+TAG_LAYER_MAPPING_MODE = 3
+TAG_LAYER_UNICODE_NAME = 4        # libcdr 不认;CorelDRAW 导出写:u32 字符数 + UTF-16LE 层名
+TAG_GROUP_SPEC = 1
+TAG_POLYCURVE_RENDER = 1
+TAG_POLYCURVE_POINTS = 2
+TAG_POLYCURVE_BBOX = 3
+TAG_POLYCURVE_KEEP_FILL = 4       # 载荷为空;CorelDRAW 导出的曲线都带
+TAG_RENDER_FILL = 1
+TAG_RENDER_FILL_UNIFORM = 1
+TAG_RENDER_OUTLINE = 1
+# CorelDRAW 导出的描边标签列表里除了 1(描边序号)还有 2 / 4 / 7,libcdr 不认,照抄取值
+RENDER_OUTLINE_EXTRA_32 = b'\x02\x07\x00\x00\x00\x00\x00' \
+    b'\x04\x07\x00\x40\xa5\xae\x02' \
+    b'\x07\x05\x00\x00\x00'
+assert len(RENDER_OUTLINE_EXTRA_32) == 19
+
+# 资源表记录里的标签(CMX_Tag_DescrSection_*)
+TAG_COLOR_BASE = 1
+TAG_COLOR_DESCR = 2
+TAG_DASH = 1
+TAG_PEN = 1
+TAG_LINESTYLE = 1
+TAG_OUTLINE = 1
+
+# rscr:CorelDRAW 32 位导出的唯一一条网屏记录(16 位的 RSCR_RECORD 换成带标签的 32 位版本)
+RSCR_RECORD_32 = b'\x01\x10\x00\x00\x00\x3c\x00\x00\x00\x00\x00\x40\xa5\xae\x02\x00\xff'
+assert len(RSCR_RECORD_32) == 17
+# ixmr 头:主索引号 1 + 「size」。16 位 UC2 写 0x18,CorelDRAW 32 位导出写 0x19
+IXMR_HEAD_32 = b'\x01\x00\x19\x00'
+assert len(IXMR_HEAD_32) == 4

@@ -343,10 +343,14 @@ class CmxIxlr(CmxRiffElement):
         self.chunk += utils.py_int2word(sz, rifx)
         self.chunk += utils.py_int2word(self.data['page'], rifx)
         for offset, name in self.data['layers']:
-            self.chunk += utils.py_int2dword(offset, rifx)
             # 移植版唯一的语义变更:图层名显式编码一次,长度用编码后的字节数。
             # 幂等 —— 这里拿到的通常已经是 BEGIN_LAYER 编码过的 bytes。
             name = utils.as_bytes(name)
+            if not self.config.v1:
+                # 32 位(移植版新增):CorelDRAW 导出在每条层记录前多一个 u16,
+                # 层名 "Layer 1" 时是 15 = 8 + 名字字节数
+                self.chunk += utils.py_int2word(8 + len(name), rifx)
+            self.chunk += utils.py_int2dword(offset, rifx)
             self.chunk += utils.py_int2word(len(name), rifx)
             self.chunk += name + b'\xff' * 4
         CmxRiffElement.update(self)
@@ -413,7 +417,7 @@ class CmxIxmr(CmxRiffElement):
         rifx = self.config.rifx
         self.chunk = self.data['identifier'] + b'\x00' * 4
         sz = len(self.data['records'])
-        self.chunk += b'\x01\x00\x18\x00'
+        self.chunk += b'\x01\x00\x18\x00' if self.config.v1 else cmx_const.IXMR_HEAD_32
         self.chunk += utils.py_int2word(sz, rifx)
         for rec_id, offset in self.data['records']:
             self.chunk += utils.py_int2word(rec_id, rifx)
@@ -667,7 +671,73 @@ V1_CHUNK_MAP = {
     cmx_const.ROTL_ID: CmxRotlV1,
 }
 
+# ------------------------------------------------------------ 32 位资源表
+# 移植版新增(修复 #33):原版 V2_CHUNK_MAP 是空表。每条记录是一串标签、以 0xFF 结束
+# (libcdr CMXParser::readRclr / readRdot / readRpen / readRott / readRotl 的 32 位分支),
+# 取值与 CorelDRAW 自己导出的 32 位 CMX 一致。增删查沿用 V1 的方法,只换落盘格式。
+
+def _records32(chunk_obj, records):
+    chunk_obj.chunk = chunk_obj.data['identifier'] + b'\x00' * 4
+    chunk_obj.chunk += struct.pack('<H', len(records))
+    for tags in records:
+        chunk_obj.chunk += b''.join(tags) + bytes([cmx_const.TAG_END])
+    CmxRiffElement.update(chunk_obj)
+
+
+class CmxRclrV2(CmxRclrV1):
+    def update(self):
+        tag = cmx_instr.tag32
+        _records32(self, [(tag(cmx_const.TAG_COLOR_BASE, bytes([model, palette])),
+                           tag(cmx_const.TAG_COLOR_DESCR, bytes(vals)))
+                          for model, palette, vals in self.data['colors']])
+
+
+class CmxRscrV2(CmxRscrV1):
+    def set_defaults(self):
+        CmxRscrV1.set_defaults(self)
+        self.data['records'] = cmx_const.RSCR_RECORD_32
+
+
+class CmxRdotV2(CmxRdotV1):
+    def update(self):
+        tag = cmx_instr.tag32
+        _records32(self, [(tag(cmx_const.TAG_DASH, struct.pack('<%dH' % (len(item) + 1), len(item), *item)),)
+                          for item in self.data['dashes']])
+
+
+class CmxRpenV2(CmxRpenV1):
+    def update(self):
+        # 32 位笔:宽度 s32、纵横比 u16、角度 s32、矩阵类型 u16(1 = 单位矩阵,不跟 6 个 double)
+        tag = cmx_instr.tag32
+        recs = []
+        for width, aspect, angle, matrix_flag in (item[:4] for item in self.data['pens']):
+            if matrix_flag != 1:
+                raise ValueError('32 位笔只支持单位矩阵')
+            recs.append((tag(cmx_const.TAG_PEN, struct.pack('<iHiH', width, aspect, angle, 1)),))
+        _records32(self, recs)
+
+
+class CmxRottV2(CmxRottV1):
+    def update(self):
+        tag = cmx_instr.tag32
+        _records32(self, [(tag(cmx_const.TAG_LINESTYLE, struct.pack('<BB', *item)),)
+                          for item in self.data['linestyles']])
+
+
+class CmxRotlV2(CmxRotlV1):
+    def update(self):
+        tag = cmx_instr.tag32
+        _records32(self, [(tag(cmx_const.TAG_OUTLINE, struct.pack('<6H', *item)),)
+                          for item in self.data['outlines']])
+
+
 V2_CHUNK_MAP = {
+    cmx_const.RCLR_ID: CmxRclrV2,
+    cmx_const.RSCR_ID: CmxRscrV2,
+    cmx_const.RDOT_ID: CmxRdotV2,
+    cmx_const.RPEN_ID: CmxRpenV2,
+    cmx_const.ROTT_ID: CmxRottV2,
+    cmx_const.ROTL_ID: CmxRotlV2,
 }
 
 

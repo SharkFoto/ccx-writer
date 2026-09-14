@@ -4,7 +4,7 @@
 #  Copyright (C) 2026 SharkFoto
 #
 #  GNU Affero General Public License v3 或更高版本,见本目录的 LICENSE。
-"""命令行:python -m ccx_writer IN.svg OUT.cdr|OUT.cmx [--pack | --no-pack]
+"""命令行:python -m ccx_writer IN.svg OUT.cdr|OUT.cmx [--pack | --no-pack] [--cmx16]
 
 退出码:0 成功;1 转换失败(原因打到 stderr);2 用法错误;
 3 输入含本移植明确不支持的内容(<text> 需先转曲线、<image>)。
@@ -25,11 +25,13 @@ def main(argv=None):
                      help='zlib 压缩(CDRX)。.cdr 的默认')
     grp.add_argument('--no-pack', dest='pack', action='store_false',
                      help='不压缩(CMX1)。.cmx 的默认;libcdr 只读得回这种')
+    ap.add_argument('--cmx16', dest='bits', action='store_const', const=16, default=32,
+                    help='写 16 位 CMX(默认 32 位;16 位导入 CorelDRAW 后虚线会变成对象)')
     args = ap.parse_args(argv)
 
     from ccx_writer.convert import convert
     try:
-        convert(args.src, args.dst, pack=args.pack)
+        convert(args.src, args.dst, pack=args.pack, bits=args.bits)
     except NotImplementedError as exc:
         sys.stderr.write('不支持:%s\n' % exc)
         return 3

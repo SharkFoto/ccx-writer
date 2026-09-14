@@ -29,6 +29,9 @@ CMX 部分,以及它依赖的 SVG 读入、sk2 文档模型:
 4. 裁掉了读取侧、hex 查看器、CLI 脚手架、偏好文件(原版用 exec 加载)、
    位图、文字转曲线与 DISP 预览。删除处留有注释。
 5. 新增 svgprep.py(SVG 输入规范化)、convert.py 与 __main__.py(入口)。
+6. **新增 32 位 CMX 写出**:原版只有 16 位(INSTR_32bit / V2_CHUNK_MAP 是空表)。
+   修复模式默认写 32 位,布局照 CorelDRAW 自己导出的 32 位 CMX 与 libcdr 的 32 位读取分支;
+   16 位输出保留为 --cmx16。原因与验证见 BUGS.md #33。
 
 写进 ICMT 块的 "Created by UniConvertor 2.0rc5" 保持原版取值,
 兼容模式的字节一致性依赖它。

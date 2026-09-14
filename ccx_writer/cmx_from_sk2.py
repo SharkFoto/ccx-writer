@@ -34,7 +34,17 @@ mkinstr = cmx_instr.make_instruction
 # 字节数:4(长度+代码)+ 1(style)+ 最多 6(填充)+ 2(描边)+ 2(点数)+ 5n + 8(包围盒)
 # + 奇数补 1 <= 32767 -> n <= 6548。留余量取 6540。
 POLYCURVE_MAX_POINTS = 6540
+# 32 位(修复 #33):4(长度+代码)+ 渲染标签最多 43 + 点表标签 5 + 9n + 包围盒标签 19 + 空标签 3
+# + 结束 1 + 奇数补 1 <= 32767 -> n <= 3632。留余量取 3620。
+POLYCURVE_MAX_POINTS_32 = 3620
+# 修复 #34:上面两个是「单条指令 <= 32767 字节」的装箱上限,只描边的曲线与互不嵌套的子路径照它拆。
+# 拆不开的一组(外框 + 它的孔)超过它时,单独写成一条扩展长度的指令(CmxInstruction.update),
+# 真正的上限是格式字段:16 位点数字段 u16;32 位点表标签长度 u16 -> 3 + 2 + 9n <= 65535 -> n <= 7281。
+# 点表拆成多个标签 libcdr 能读,但 CorelDRAW 只保留最后一个(真机实测 12000 点只剩后 5000 点),不能拆。
+POLYCURVE_HARD_POINTS = 65535
+POLYCURVE_HARD_POINTS_32 = 7281
 INT16_MAX = 32767
+INT32_MAX = 2147483647
 # 笔宽、虚线元素在 libcdr 里同样按 s16 读(CommonParser::readCoordinate)。
 S16_MAX = 32767
 # 16 位 CMX 的原生坐标单位(英寸),见 make_template 修复 #28。
@@ -159,11 +169,12 @@ class SK2_to_CMX_Translator(object):
                 joincap = (join << 4) | cap
                 # 修复 #8:原版 spec 恒为 0x02,从不置虚线位,虚线全部丢失。
                 # 读取侧 cmx_to_sk2.py:245:dashes 只在 spec & 0x04 时生效。
-                # 保留实线位(0x06):CorelDRAW 真机实测只写 0x04 时虚线被忽略、画成实线。
-                # 0x06 的虚线 CorelDRAW 导入后转成「组 + 填充曲线」,外观、虚线节奏正确,
-                # 但不再是可编辑的虚线轮廓;0x26(随图缩放)同样。实线轮廓保持可编辑。
+                # 16 位:保留实线位(0x06)。CorelDRAW 真机实测只写 0x04 时虚线被忽略、画成实线;
+                # 0x06 的虚线导入后转成「组 + 填充曲线」,外观对,但不再是可编辑的虚线轮廓。
+                # 32 位(修复 #33):虚线只写 0x04。CorelDRAW 自己导出的 32 位 CMX 就是 0x04、导回可编辑;
+                # 同一文件改成 0x06 轮廓变 None(BUGS.md #33 对照实验)。
                 if outline[3]:
-                    spec |= 0x04
+                    spec = spec | 0x04 if self.cmx_cfg.v16bit else 0x04
             linestyle = (spec, joincap)
         return rott.add_linestyle(linestyle)
 
@@ -177,7 +188,8 @@ class SK2_to_CMX_Translator(object):
             # 审查确认:笔宽在 libcdr 里按 s16 读,u16 封顶会让 32768-65535 读成负数;
             # 量程也已经把笔宽算进去(_max_abs_coord),正常输入不会触顶。
             w = self.coef * outline[1]
-            width = 0 if w <= 0 else min(S16_MAX, max(1, int(utils.py2round(w))))
+            cap = S16_MAX if self.cmx_cfg.v16bit else INT32_MAX
+            width = 0 if w <= 0 else min(cap, max(1, int(utils.py2round(w))))
         aspect = 100
         angle = 0
         matrix_flag = 1
@@ -223,7 +235,9 @@ class SK2_to_CMX_Translator(object):
         self.rifx = self.cmx_cfg.rifx
         cont_obj = self.make_el(cmx_const.CONT_ID)
         self.cmx_model.add(cont_obj)
-        self.cmx_model.add(self.make_el(cmx_const.CCMM_ID))
+        if self.cmx_cfg.v16bit:
+            # 32 位不写 ccmm(色彩校正块):CorelDRAW 自己的 32 位导出没有它
+            self.cmx_model.add(self.make_el(cmx_const.CCMM_ID))
         if self.cmx_cfg.save_preview:
             # 原版在这里塞 DISP 预览块(libimg.generate_preview + CairoRenderer)。
             # 移植版不带 pycairo,save_preview 恒 False;分支保留以便 diff 对齐。
@@ -237,7 +251,8 @@ class SK2_to_CMX_Translator(object):
         for page in self.sk2_mtds.get_pages():
             self.root.add(self.make_el(cmx_const.PAGE_ID))
             self.root.add(self.make_el(cmx_const.RLST_ID))
-            if not self.cmx_cfg.v1:
+            if not self.cmx_cfg.v1 and self.cmx_cfg.v16bit:
+                # 32 位只有一个 rlst(CorelDRAW 导出如此);这条原版分支属于从未跑通的 16 位 V2
                 self.root.add(self.make_el(cmx_const.RLST_ID))
             for layer in page.childs:
                 objs.extend(layer.childs)
@@ -248,6 +263,15 @@ class SK2_to_CMX_Translator(object):
         for cmx_id in cmx_ids:
             self.root.add(self.make_el(cmx_id))
         self.cmx_model.update_map()
+
+        if not self.cmx_cfg.v16bit:
+            # 修复 #33:32 位 CMX 的坐标单位固定 1/254000 英寸(libcdr readCoordinate:readS32 / 254000),
+            # s32 量程 +-8454 英寸,不需要按内容选单位。cont 头保留默认的 unit 0x23 + factor 1e-7,
+            # 与 CorelDRAW 自己的 32 位导出一致。
+            if self.cmx_cfg.uc2_compat:
+                raise ValueError('兼容模式只有 16 位')
+            self.coef = sk2const.pt_to_in * cmx_const.UNITS_PER_IN_32
+            return
 
         self.coef = sk2const.pt_to_in * 1000.0
         factor = 0.001
@@ -296,7 +320,8 @@ class SK2_to_CMX_Translator(object):
         for page in self.sk2_mtds.get_pages():
             cmx_page = cmx_pages[index][0]
             rlsts = cmx_pages[index][1:]
-            if self.cmx_cfg.v1:
+            if self.cmx_cfg.v1 or not self.cmx_cfg.v16bit:
+                # 32 位与 16 位的对象树相同,指令类按 v16bit 选(cmx_instr.make_instruction)
                 self.make_v1_page(page, index + 1, cmx_page, rlsts)
                 rlst = rlsts[0]
                 layers_num = len(cmx_page.childs[0].childs) - 1
@@ -321,7 +346,7 @@ class SK2_to_CMX_Translator(object):
         stack = [instr]
         while stack:
             it = stack.pop()
-            if isinstance(it, cmx_instr.Inst16PolyCurve):
+            if it.data.get('code') == cmx_const.POLYCURVE:
                 if it.data.get('bbox'):
                     boxes.append(it.data['bbox'])
                 continue
@@ -529,6 +554,12 @@ class SK2_to_CMX_Translator(object):
 
     # ------------------------------------------------------ Step 7 新增方法
 
+    def _max_points(self):
+        return POLYCURVE_MAX_POINTS if self.cmx_cfg.v16bit else POLYCURVE_MAX_POINTS_32
+
+    def _hard_points(self):
+        return POLYCURVE_HARD_POINTS if self.cmx_cfg.v16bit else POLYCURVE_HARD_POINTS_32
+
     def _curve_of(self, obj):
         """obj.to_curve() 的缓存。修复 #11:先判 None 再 update。"""
         key = id(obj)
@@ -651,15 +682,18 @@ class SK2_to_CMX_Translator(object):
         if not subs:
             return
 
+        lim = INT16_MAX if self.cmx_cfg.v16bit else INT32_MAX
         for start, segs, _closed in subs:
             for q in [start] + [q for _nodes, pts in segs for q in pts]:
-                if abs(q[0]) > INT16_MAX or abs(q[1]) > INT16_MAX:
-                    raise ValueError('坐标越界 int16:%r(量程计算有误)' % (q,))
+                if abs(q[0]) > lim or abs(q[1]) > lim:
+                    if self.cmx_cfg.v16bit:
+                        raise ValueError('坐标越界 int16:%r(量程计算有误)' % (q,))
+                    raise ValueError('坐标超出 32 位 CMX 的量程(约 +-8454 英寸):%r' % (q,))
 
         total = sum(1 + sum(len(p) for _n, p in segs) for _s, segs, _c in subs)
         filled = bool(attrs.get('style_flags', 0) & cmx_const.INSTR_FILL_FLAG) and \
             attrs.get('fill_type') != cmx_const.INSTR_FILL_EMPTY
-        if total <= POLYCURVE_MAX_POINTS:
+        if total <= self._max_points():
             chunks = [subs]
         elif filled:
             # 审查确认:上限按 s16 降到 6540 点之后,「有填充就不拆」会误伤 potrace 描摹 ——
@@ -742,7 +776,7 @@ class SK2_to_CMX_Translator(object):
         只会让组变大,不会拆散真正的孔)。用粗网格索引候选,避免子路径多时 O(n^2)。
         单组超过上限 -> ValueError(拆开就会把孔填实)。
         """
-        limit = POLYCURVE_MAX_POINTS
+        limit = self._max_points()
         n = len(subs)
         boxes = []
         for start, segs, _closed in subs:
@@ -792,8 +826,17 @@ class SK2_to_CMX_Translator(object):
             members = sorted(groups[root])
             size = sum(1 + sum(len(p) for _nd, p in subs[i][1]) for i in members)
             if size > limit:
-                raise ValueError('填充复合路径里一组相互嵌套的子路径共 %d 个点,超过 CMX 单条指令上限 %d;'
-                                 '拆开会把孔填实,不拆' % (size, limit))
+                hard = self._hard_points()
+                if size > hard:
+                    raise ValueError('填充复合路径里一组相互嵌套的子路径共 %d 个点,超过 %d 位 CMX 单条曲线上限 %d;'
+                                     '拆开会把孔填实,不拆' % (size, 16 if self.cmx_cfg.v16bit else 32, hard))
+                # 修复 #34:原来这里直接报错(单条指令 <= 32767 字节是我们自己加的限制,不是格式限制)。
+                # 这一组单独成一条扩展长度的指令,前后的组照常装箱
+                if cur:
+                    chunks.append(cur)
+                    cur, cur_n = [], 0
+                chunks.append([subs[i] for i in members])
+                continue
             if cur and cur_n + size > limit:
                 chunks.append(cur)
                 cur, cur_n = [], 0
@@ -806,7 +849,7 @@ class SK2_to_CMX_Translator(object):
     def _split_for_limit(self, subs):
         """只描边曲线的拆分:先按子路径装箱;单条子路径本身超限时,按段边界切成
         首尾相接的开放片段(闭合的先补一段回到起点,再当开放的切)。"""
-        limit = POLYCURVE_MAX_POINTS
+        limit = self._max_points()
         pieces = []
         for start, segs, closed in subs:
             n = 1 + sum(len(p) for _n, p in segs)

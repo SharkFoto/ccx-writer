@@ -178,6 +178,13 @@ class CmxInstruction(CmxObject):
         if self.is_padding():
             self.chunk += b'\x00'
         size = len(self.chunk)
+        if size > 32767 and not self.config.uc2_compat:
+            # 修复 #34:长度字段是 s16(libcdr readCommands 按 readS16 读),> 32767 字节的指令用扩展长度:
+            # FF FF + s32 真实长度(含这 8 字节头)+ 代码。libcdr 读到负数就改读 s32;CorelDRAW 真机导入
+            # 32 位 5000 点 / 16 位 8000 点的带孔填充,尺寸正确。只有拆不开的带孔填充才会用到(见 _split_filled)。
+            sig = '>i' if self.config.rifx else '<i'
+            self.chunk = b'\xff\xff' + struct.pack(sig, size + 4) + self._get_code_str() + self.chunk[4:]
+            return
         sz = utils.py_int2word(size, self.config.rifx)
         self.chunk = sz + self._get_code_str() + self.chunk[4:]
 
@@ -333,7 +340,129 @@ INSTR_16bit = {
     cmx_const.JUMP_ABSOLUTE: Inst16JumpAbsolute,
 }
 
-INSTR_32bit = {}
+
+# ------------------------------------------------------------------ 32 位指令
+# 移植版新增(修复 #33):原版 INSTR_32bit 是空表,32 位 CMX 根本写不出来。
+# CorelDRAW 导入 16 位 CMX 时虚线轮廓会被转成对象,只有 32 位能保留可编辑的虚线(BUGS.md #33)。
+# 布局照 CorelDRAW 自己导出的 32 位 CMX 与 libcdr CMXParser 的 32 位分支;只支持小端。
+
+def tag32(tag_id, payload=b''):
+    """32 位 CMX 的一个标签:id(u8)+ 总长(u16,含这 3 字节)+ 载荷。"""
+    size = len(payload) + 3
+    if size > 0xFFFF:
+        raise ValueError('CMX 标签 %d 长 %d 字节,超过 u16' % (tag_id, size))
+    return struct.pack('<BH', tag_id, size) + payload
+
+
+_END = bytes([cmx_const.TAG_END])
+
+
+class _Inst32(CmxInstruction):
+    def update(self):
+        # > 32767 字节时由基类写扩展长度(#34);32 位真正的上限是标签长度 u16,由 tag32 把关
+        CmxInstruction.update(self)
+
+
+def _end_offset(instr, head_len):
+    """容器指令(BeginPage / BeginGroup)里最后一个子指令(EndPage / EndGroup)的文件偏移。
+    本指令自身的 chunk 长度在这一轮 update 里才定下来,所以不用 get_offset 取子指令的偏移。"""
+    return instr.get_offset() + head_len + sum(c.get_chunk_size() for c in instr.childs[:-1])
+
+
+class Inst32BeginPage(_Inst32):
+    is_page = True
+
+    def _body(self, end_address):
+        d = self.data
+        spec = struct.pack('<HI4i', d['page_number'], d['flags'], *d['bbox'])
+        # 结束偏移 = EndPage 指令的文件偏移;层数;tally = 页内指令数(含 BeginPage / EndPage),
+        # 与 BeginLayer 的 tally 同一口径。CorelDRAW 导出:0x7c570 / 1 / 6。
+        layers = sum(1 for c in self.childs if c.is_layer)     # 空文档的空层被跳过时是 0
+        spec += struct.pack('<IHI', end_address, layers, self.count() + 1)
+        body = tag32(cmx_const.TAG_PAGE_SPEC, spec)
+        body += tag32(cmx_const.TAG_PAGE_MATRIX, struct.pack('<H', 1))   # 单位矩阵
+        body += tag32(cmx_const.TAG_PAGE_MAPPING_MODE, b'\x00')
+        return body + _END
+
+    def update(self):
+        head = b'\x00\x00' + utils.py_int2word(self.data['code'])
+        size = len(head) + len(self._body(0))
+        size += size & 1
+        self.chunk = head + self._body(_end_offset(self, size))
+        _Inst32.update(self)
+
+
+class Inst32BeginLayer(_Inst32):
+    is_layer = True
+
+    def update(self):
+        d = self.data
+        name = utils.as_bytes(d['layer_name'])
+        spec = struct.pack('<HHII', d['page_number'], d['layer_number'], d['flags'], d['tally'])
+        spec += struct.pack('<H', len(name)) + name
+        body = tag32(cmx_const.TAG_LAYER_SPEC, spec)
+        body += tag32(cmx_const.TAG_LAYER_MATRIX, struct.pack('<H', 1))
+        body += tag32(cmx_const.TAG_LAYER_MAPPING_MODE, b'\x00')
+        uname = name.decode('utf-8', 'replace')
+        body += tag32(cmx_const.TAG_LAYER_UNICODE_NAME,
+                      struct.pack('<I', len(uname.encode('utf-16-le')) // 2) + uname.encode('utf-16-le'))
+        self.chunk = b'\x00\x00' + utils.py_int2word(d['code']) + body + _END
+        _Inst32.update(self)
+
+
+class Inst32BeginGroup(_Inst32):
+    def _body(self, end_address):
+        spec = struct.pack('<4i', *self.data['bbox'])
+        # 组层数(u16)、组内指令数(含 BeginGroup / EndGroup)、EndGroup 的文件偏移
+        spec += struct.pack('<HII', 0, self.count() + 1, end_address)
+        return tag32(cmx_const.TAG_GROUP_SPEC, spec) + _END
+
+    def update(self):
+        head = b'\x00\x00' + utils.py_int2word(self.data['code'])
+        size = len(head) + len(self._body(0))
+        size += size & 1
+        self.chunk = head + self._body(_end_offset(self, size))
+        _Inst32.update(self)
+
+
+class Inst32PolyCurve(_Inst32):
+    def update(self):
+        d = self.data
+        flags = d['style_flags']
+        fill_type = d.get('fill_type', cmx_const.INSTR_FILL_EMPTY)
+        if fill_type != cmx_const.INSTR_FILL_UNIFORM:
+            # 32 位只写均匀填充;空填充不置填充位(libcdr 会把「填充位 + 类型 0」读成一次空填充)
+            flags &= ~cmx_const.INSTR_FILL_FLAG
+        render = bytes([flags])
+        if flags & cmx_const.INSTR_FILL_FLAG:
+            uniform = tag32(cmx_const.TAG_RENDER_FILL_UNIFORM, struct.pack('<HH', *d['fill']))
+            render += tag32(cmx_const.TAG_RENDER_FILL,
+                            struct.pack('<H', fill_type) + uniform + _END) + _END
+        if flags & cmx_const.INSTR_STROKE_FLAG:
+            render += tag32(cmx_const.TAG_RENDER_OUTLINE, struct.pack('<H', d['outline']))
+            render += cmx_const.RENDER_OUTLINE_EXTRA_32 + _END
+        pts = d['points']
+        plist = struct.pack('<H', len(pts))
+        plist += struct.pack('<%di' % (2 * len(pts)), *[v for p in pts for v in p])
+        plist += bytes(d['nodes'])
+        body = tag32(cmx_const.TAG_POLYCURVE_RENDER, render)
+        body += tag32(cmx_const.TAG_POLYCURVE_POINTS, plist)
+        body += tag32(cmx_const.TAG_POLYCURVE_BBOX, struct.pack('<4i', *d['bbox']))
+        body += tag32(cmx_const.TAG_POLYCURVE_KEEP_FILL)
+        self.chunk = b'\x00\x00' + utils.py_int2word(d['code']) + body + _END
+        _Inst32.update(self)
+
+    def get_bbox(self):
+        bbox = self.data.get('bbox')
+        return list(bbox) if bbox else None
+
+
+INSTR_32bit = {
+    cmx_const.BEGIN_PAGE: Inst32BeginPage,
+    cmx_const.BEGIN_LAYER: Inst32BeginLayer,
+    cmx_const.BEGIN_GROUP: Inst32BeginGroup,
+    cmx_const.POLYCURVE: Inst32PolyCurve,
+}
 
 
 def make_instruction(config, chunk=None, offset=0, identifier=None, **kwargs):

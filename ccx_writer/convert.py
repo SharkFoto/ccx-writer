@@ -51,7 +51,7 @@ class AppData(object):
 PACK_BY_EXT = {'.cdr': True, '.cmx': False}
 
 
-def convert(svg_path, out_path, pack=None, appdata=None, uc2_compat=False):
+def convert(svg_path, out_path, pack=None, appdata=None, uc2_compat=False, bits=None):
     """把一个 SVG 转成 .cdr / .cmx。
 
     pack=None 时按扩展名走原版的默认;显式传 True/False 覆盖。
@@ -60,6 +60,9 @@ def convert(svg_path, out_path, pack=None, appdata=None, uc2_compat=False):
     这是 Step 9 接入 office 时要做的选择,入口先把开关留好。
 
     uc2_compat=True 逐位复现 UniConvertor 原版(含精度缺陷),只给回归验证用。
+
+    bits:CMX 坐标宽度。修复模式默认 32(CorelDRAW 导入后虚线仍是可编辑的虚线轮廓,BUGS.md #33);
+    16 = 修复过的 16 位输出。兼容模式只有 16 位。
     """
     from ccx_writer.svg_loader import svg_loader
     from ccx_writer import cmx_saver
@@ -69,11 +72,16 @@ def convert(svg_path, out_path, pack=None, appdata=None, uc2_compat=False):
         if ext not in PACK_BY_EXT:
             raise ValueError('输出扩展名只能是 .cdr 或 .cmx,收到 %r' % ext)
         pack = PACK_BY_EXT[ext]
+    if bits is None:
+        bits = 16 if uc2_compat else 32
+    if bits not in (16, 32) or (uc2_compat and bits != 16):
+        raise ValueError('bits 只能是 16 或 32(兼容模式只有 16):%r' % (bits,))
     appdata = appdata or AppData()
     sk2_doc = svg_loader(appdata, svg_path, cnf={'uc2_compat': uc2_compat})
     try:
         cmx_saver(sk2_doc, out_path, cnf={'pack': pack, 'save_preview': False,
-                                          'uc2_compat': uc2_compat})
+                                          'uc2_compat': uc2_compat,
+                                          'v16bit': bits == 16, 'v1': bits == 16})
     finally:
         close = getattr(sk2_doc, 'close', None)
         if close:
